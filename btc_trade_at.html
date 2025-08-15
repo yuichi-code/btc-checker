@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BTC price at a second (aggTrades)</title>
+<style>
+  :root{--bd:#e5e7eb;--fg:#111827;--muted:#6b7280}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;color:var(--fg);margin:16px;line-height:1.7}
+  h1{font-size:1.15rem;margin:0 0 12px}
+  .card{border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+  .muted{color:var(--muted)}
+  input,button{padding:10px;border-radius:10px;border:1px solid var(--bd)}
+  button{background:#f9fafb}
+  .small{font-size:.92rem}
+</style>
+</head>
+<body>
+  <h1>「その秒のBTC価格（USD）」ピンポイント検索</h1>
+  <div class="card">
+    <div class="muted small">※ JSTの日時を入力して「検索」。内部でUTCに直して <code>aggTrades</code> を叩き、ターゲット秒に最も近い約定を返すで。</div>
+    <div class="row">
+      <label for="dt" class="small">日時（JST, 秒まで）</label>
+      <input id="dt" type="datetime-local" step="1" />
+      <label for="sec" class="small">検索幅±秒</label>
+      <input id="sec" type="number" min="1" value="30" style="width:100px" />
+      <button id="go">検索</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="muted small" id="head">未検索</div>
+    <div class="mono" id="main">-</div>
+    <div class="mono" id="ctx">-</div>
+    <div class="muted small" id="note">Binance REST API / <code>/api/v3/aggTrades</code></div>
+  </div>
+
+<script>
+  // ---------- ユーティリ ----------
+  const pad2 = n => String(n).padStart(2,'0');
+  const fmtJSTms = (ms)=>{
+    const d = new Date(ms + 9*3600*1000); // UTC→JST
+    return `${d.getUTCFullYear()}/${pad2(d.getUTCMonth()+1)}/${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}.${String(d.getUTCMilliseconds()).padStart(3,'0')}`;
+  };
+  const fmtNum = (n,d=2)=> Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+
+  // JST datetime-local → その時刻のUTC ms
+  function jstLocalToUtcMs(str){
+    // "YYYY-MM-DDTHH:MM:SS" を JST としてパースし、UTCに直す
+    // 明示オフセットで安全に
+    const ms = new Date(str.replace('T','T') + '+09:00').getTime();
+    return ms - 9*3600*1000; // いったんUTC msに
+  }
+
+  // aggTrades取得（公開・APIキー不要）
+  async function fetchAggTrades(symbol, startMs, endMs, limit=1000){
+    const url = new URL('https://api.binance.com/api/v3/aggTrades');
+    url.search = new URLSearchParams({
+      symbol, startTime:String(startMs), endTime:String(endMs), limit:String(limit)
+    }).toString();
+    const res = await fetch(url);
+    if(!res.ok) throw new Error(`aggTrades fetch failed (${res.status})`);
+    return res.json(); // [{a:aggId,p:price,q:qty,f:... ,T:ms,m:bool}, ...]
+  }
+
+  function findClosest(trades, targetMs){
+    if(!trades || !trades.length) return null;
+    let best = trades[0], bestDiff = Math.abs(trades[0].T - targetMs);
+    for(const t of trades){
+      const d = Math.abs(t.T - targetMs);
+      if(d < bestDiff){ best = t; bestDiff = d; }
+    }
+    // 直前・直後も拾っておく（コンテキスト用）
+    let before=null, after=null;
+    for(const t of trades){
+      if(t.T <= targetMs){ if(!before || t.T > before.T) before = t; }
+      if(t.T >= targetMs){ if(!after  || t.T < after.T ) after  = t; }
+    }
+    return {best, before, after, diffMs: bestDiff};
+  }
+
+  async function run(){
+    const dtStr = document.getElementById('dt').value;
+    const spanSec = Math.max(1, parseInt(document.getElementById('sec').value,10) || 30);
+    const head = document.getElementById('head');
+    const main = document.getElementById('main');
+    const ctx  = document.getElementById('ctx');
+    const note = document.getElementById('note');
+
+    if(!dtStr){ head.textContent = '日時が未入力やで'; return; }
+
+    // 目標時刻（UTC ms）
+    const targetUtcMs = jstLocalToUtcMs(dtStr);
+
+    // 検索ウィンドウ（±spanSec）
+    let windowSec = spanSec;
+    let trades = [];
+    head.textContent = `JST ${dtStr.replace('T',' ')} の直近約定を探索中…`;
+
+    // 段階的にウィンドウ拡大（データが薄い時間に対応）
+    for(const tries of [1,2,3]){
+      const start = targetUtcMs - windowSec*1000;
+      const end   = targetUtcMs + windowSec*1000;
+      try{
+        trades = await fetchAggTrades('BTCUSDT', start, end, 1000);
+      }catch(err){
+        note.textContent = `エラー: ${err.message}`;
+        return;
+      }
+      if(trades.length){ break; }
+      windowSec *= 4; // どんどん広げる
+    }
+
+    if(!trades.length){
+      head.textContent = 'その近辺の約定が見つからんかったで（時間を広げて再検索してみて）';
+      main.textContent = '-';
+      ctx.textContent  = '-';
+      return;
+    }
+
+    const {best, before, after, diffMs} = findClosest(trades, targetUtcMs);
+
+    // 表示
+    head.textContent = `JST ${dtStr.replace('T',' ')} の直近（差 ${Math.round(diffMs)} ms）`;
+    main.textContent = `価格(USD): ${fmtNum(best.p, 2)}   量(BTC): ${best.q}   約定時刻(JST): ${fmtJSTms(best.T)}`;
+    ctx.textContent  = `直前: ${before? fmtJSTms(before.T)+' @ '+fmtNum(before.p,2): 'なし'}   ／   直後: ${after? fmtJSTms(after.T)+' @ '+fmtNum(after.p,2): 'なし'}`;
+    note.textContent = 'Binance REST API / aggTrades（秒〜ミリ秒精度）';
+  }
+
+  // 初期値：いま（JST）
+  (function init(){
+    const now = new Date();
+    // JSTの現在時刻をdatetime-local用に
+    const j = new Date(now.getTime() + 9*3600*1000);
+    const s = `${j.getUTCFullYear()}-${pad2(j.getUTCMonth()+1)}-${pad2(j.getUTCDate())}T${pad2(j.getUTCHours())}:${pad2(j.getUTCMinutes())}:${pad2(j.getUTCSeconds())}`;
+    document.getElementById('dt').value = s;
+    document.getElementById('go').addEventListener('click', run);
+  })();
+</script>
+</body>
+</html>

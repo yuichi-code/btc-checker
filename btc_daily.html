@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BTC きょう & 指定日（日足）</title>
+<style>
+  :root{--bd:#e5e7eb;--fg:#111827;--muted:#6b7280}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;color:var(--fg);margin:16px;line-height:1.7}
+  h1{font-size:1.15rem;margin:0 0 12px}
+  .card{border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+  .muted{color:var(--muted)}
+  button{padding:10px 14px;border-radius:10px;border:1px solid var(--bd);background:#f9fafb}
+  input[type="date"]{padding:10px;border-radius:10px;border:1px solid var(--bd)}
+  .small{font-size:.92rem}
+</style>
+</head>
+<body>
+  <h1>BTC 価格ビューア（最新 & 指定日）</h1>
+
+  <!-- 上段：最新（アクセス時に自動で出す） -->
+  <div class="card" id="now-card">
+    <div class="row" style="justify-content:space-between">
+      <div class="muted small" id="now-ts">読み込み中…</div>
+      <button id="reloadBtn" title="最新を再取得">更新</button>
+    </div>
+    <div class="mono" id="now-usd">BTC (USD): -</div>
+    <div class="mono" id="now-jpy">BTC (JPY): -</div>
+    <div class="mono" id="now-usdjpy">USD/JPY : -</div>
+    <div class="muted small" id="now-note">Binance REST API / Ticker</div>
+  </div>
+
+  <!-- 下段：指定日（日足） -->
+  <div class="card">
+    <div class="row">
+      <label for="date" class="small">日付を選択（JST）</label>
+      <input type="date" id="date" />
+      <button id="fetchBtn">指定日を取得</button>
+    </div>
+    <div class="muted small" id="day-head">未取得</div>
+    <div class="mono" id="day-o">始値: -</div>
+    <div class="mono" id="day-h">高値: -</div>
+    <div class="mono" id="day-l">安値: -</div>
+    <div class="mono" id="day-c">終値: -</div>
+    <div class="mono" id="day-vb">出来高(BTC): -</div>
+    <div class="mono" id="day-vq">出来高(USDT): -</div>
+    <div class="mono" id="day-trades">取引回数: -</div>
+    <div class="muted small" id="day-note">Binance REST API / Klines 1d</div>
+  </div>
+
+<script>
+  // ===== ユーティリティ =====
+  const fmtNum = (n, d=2) => Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+  const fmtInt = (n) => Number(n).toLocaleString('en-US',{maximumFractionDigits:0});
+  const fmtJST = (date)=> new Intl.DateTimeFormat('ja-JP',{
+    timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit'
+  }).format(date).replace(/\./g,'/'); // Android一部で . 区切り対策
+
+  // きょう(JST)を <input type="date"> 用 "YYYY-MM-DD" に
+  function todayJstForInput(){
+    const parts = new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const y = parts.find(p=>p.type==='year').value;
+    const m = parts.find(p=>p.type==='month').value;
+    const d = parts.find(p=>p.type==='day').value;
+    return `${y}-${m}-${d}`;
+  }
+
+  // ===== 最新（いま）取得 =====
+  async function fetchNow(){
+    document.getElementById('now-ts').textContent = fmtJST(new Date());
+    document.getElementById('now-note').textContent = 'Binance REST API / Ticker';
+    try{
+      const [usdRes, jpyRes] = await Promise.all([
+        fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'),
+        fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCJPY')
+      ]);
+      if(!usdRes.ok || !jpyRes.ok) throw new Error('最新価格の取得に失敗しました');
+
+      const usd = await usdRes.json();
+      const jpy = await jpyRes.json();
+      const btcUsd = parseFloat(usd.price);
+      const btcJpy = parseFloat(jpy.price);
+      const usdjpy = btcJpy / btcUsd;
+
+      document.getElementById('now-usd').textContent    = `BTC (USD): ${fmtNum(btcUsd,2)}`;
+      document.getElementById('now-jpy').textContent    = `BTC (JPY): ${fmtInt(btcJpy)}`;
+      document.getElementById('now-usdjpy').textContent = `USD/JPY : ${fmtNum(usdjpy,2)}`;
+    }catch(err){
+      document.getElementById('now-note').textContent = `エラー: ${err.message}`;
+    }
+  }
+
+  // ===== 指定日（日足）取得 =====
+  async function fetchDay(dateStr){ // "YYYY-MM-DD" (JST)
+    if(!dateStr){
+      document.getElementById('day-head').textContent = '日付が未入力やで';
+      return;
+    }
+    const jstMidnight = new Date(`${dateStr}T00:00:00+09:00`);
+    const startMs = jstMidnight.getTime();
+
+    document.getElementById('day-head').textContent = `${dateStr.replaceAll('-','/')} (JST) 読み込み中…`;
+    try{
+      const url = new URL('https://api.binance.com/api/v3/klines');
+      url.search = new URLSearchParams({
+        symbol:'BTCUSDT', interval:'1d', startTime:String(startMs), limit:'1'
+      }).toString();
+
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('指定日の取得に失敗しました');
+      const arr = await res.json();
+      if(!arr || !arr.length){
+        document.getElementById('day-head').textContent = 'その日はデータが見つからんかったで';
+        return;
+      }
+      const k = arr[0];
+      const open = parseFloat(k[1]), high = parseFloat(k[2]), low = parseFloat(k[3]), close = parseFloat(k[4]);
+      const volB = parseFloat(k[5]);   // BTC出来高
+      const volQ = parseFloat(k[7]);   // USDT出来高
+      const trades = parseInt(k[8],10);
+
+      document.getElementById('day-head').textContent = `${dateStr.replaceAll('-','/')} (JST)`;
+      document.getElementById('day-o').textContent  = `始値: ${fmtNum(open,2)} USD`;
+      document.getElementById('day-h').textContent  = `高値: ${fmtNum(high,2)} USD`;
+      document.getElementById('day-l').textContent  = `安値: ${fmtNum(low,2)} USD`;
+      document.getElementById('day-c').textContent  = `終値: ${fmtNum(close,2)} USD`;
+      document.getElementById('day-vb').textContent = `出来高(BTC): ${fmtNum(volB,4)} BTC`;
+      document.getElementById('day-vq').textContent = `出来高(USDT): ${fmtNum(volQ,2)} USDT`;
+      document.getElementById('day-trades').textContent = `取引回数: ${trades.toLocaleString('en-US')}`;
+    }catch(err){
+      document.getElementById('day-note').textContent = `エラー: ${err.message}`;
+    }
+  }
+
+  // ===== 初期化 =====
+  (()=> {
+    // きょうを既定値に
+    document.getElementById('date').value = todayJstForInput();
+    // 最新を即時取得
+    fetchNow();
+    // ボタン
+    document.getElementById('fetchBtn').addEventListener('click', ()=> {
+      fetchDay(document.getElementById('date').value);
+    });
+    document.getElementById('reloadBtn').addEventListener('click', fetchNow);
+  })();
+</script>
+</body>
+</html>

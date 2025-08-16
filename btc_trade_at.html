@@ -77,7 +77,6 @@
 
   function jstLocalToUtcMs(str){
     const ms = new Date(str + '+09:00').getTime();
-    return ms - 9*3600*1000;
   }
 
   async function fetchAggTrades(symbol, startMs, endMs, limit=1000){

@@ -21,9 +21,9 @@
 </style>
 </head>
 <body>
-  <h1>「その秒のBTC価格（USD）」ピンポイント検索</h1>
+  <h1>BTC Price Search</h1>
   <div class="card">
-    <div class="muted small">※ JSTの日時を入力して「検索」。UTCへ変換して <code>aggTrades</code> を叩き、ターゲット秒に最も近い約定を返すで。</div>
+    <div class="muted small">※ JSTの日時を入力して「検索」。UTCへ変換して <code>aggTrades</code> をチョンとして、ターゲット秒に最も近い約定を返します。</div>
     <div class="row">
       <label for="dt" class="small">日時（JST, 秒まで）</label>
       <input id="dt" type="datetime-local" step="1" />
@@ -42,7 +42,7 @@
 
   <!-- ここから追加：購入記録フォーム -->
   <div class="card">
-    <h3>購入記録</h3>
+    <h3>購入記録用計算</h3>
     <div class="row">
       <label class="small">BTCドル価格</label>
       <input id="priceUsd" type="number" step="0.01">
@@ -50,7 +50,7 @@
       <input id="usdJpy" type="number" step="0.01">
       <label class="small">購入量(BTC)</label>
       <input id="amountBtc" type="number" step="0.00000001">
-      <button id="addRecord">記録する</button>
+      <button id="addRecord">計算する</button>
     </div>
     <table id="recordsTable">
       <thead>

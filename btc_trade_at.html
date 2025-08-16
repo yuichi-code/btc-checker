@@ -75,9 +75,9 @@
   };
   const fmtNum = (n,d=2)=> Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 
-  function jstLocalToUtcMs(str){
-    const ms = new Date(str + '+09:00').getTime();
-  }
+function jstLocalToUtcMs(str){
+  return new Date(str + '+09:00').getTime();
+}
 
   async function fetchAggTrades(symbol, startMs, endMs, limit=1000){
     const url = new URL('https://api.binance.com/api/v3/aggTrades');

@@ -16,12 +16,14 @@
   input,button{padding:10px;border-radius:10px;border:1px solid var(--bd)}
   button{background:#f9fafb}
   .small{font-size:.92rem}
+  table{border-collapse:collapse;width:100%;margin-top:10px}
+  th,td{border:1px solid var(--bd);padding:4px 6px;text-align:center}
 </style>
 </head>
 <body>
   <h1>「その秒のBTC価格（USD）」ピンポイント検索</h1>
   <div class="card">
-    <div class="muted small">※ JSTの日時を入力して「検索」。内部でUTCに直して <code>aggTrades</code> を叩き、ターゲット秒に最も近い約定を返すで。</div>
+    <div class="muted small">※ JSTの日時を入力して「検索」。UTCへ変換して <code>aggTrades</code> を叩き、ターゲット秒に最も近い約定を返すで。</div>
     <div class="row">
       <label for="dt" class="small">日時（JST, 秒まで）</label>
       <input id="dt" type="datetime-local" step="1" />
@@ -38,8 +40,34 @@
     <div class="muted small" id="note">Binance REST API / <code>/api/v3/aggTrades</code></div>
   </div>
 
+  <!-- ここから追加：購入記録フォーム -->
+  <div class="card">
+    <h3>購入記録</h3>
+    <div class="row">
+      <label class="small">BTCドル価格</label>
+      <input id="priceUsd" type="number" step="0.01">
+      <label class="small">ドル円（逆算）</label>
+      <input id="usdJpy" type="number" step="0.01">
+      <label class="small">購入量(BTC)</label>
+      <input id="amountBtc" type="number" step="0.00000001">
+      <button id="addRecord">記録する</button>
+    </div>
+    <table id="recordsTable">
+      <thead>
+        <tr>
+          <th>購入日時(JST)</th>
+          <th>BTCドル価格</th>
+          <th>BTC円価格</th>
+          <th>購入量(BTC)</th>
+          <th>購入額(円)</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <!-- ここまで追加 -->
+
 <script>
-  // ---------- ユーティリ ----------
   const pad2 = n => String(n).padStart(2,'0');
   const fmtJSTms = (ms)=>{
     const d = new Date(ms + 9*3600*1000); // UTC→JST
@@ -47,15 +75,11 @@
   };
   const fmtNum = (n,d=2)=> Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 
-  // JST datetime-local → その時刻のUTC ms
   function jstLocalToUtcMs(str){
-    // "YYYY-MM-DDTHH:MM:SS" を JST としてパースし、UTCに直す
-    // 明示オフセットで安全に
-    const ms = new Date(str.replace('T','T') + '+09:00').getTime();
-    return ms - 9*3600*1000; // いったんUTC msに
+    const ms = new Date(str + '+09:00').getTime();
+    return ms - 9*3600*1000;
   }
 
-  // aggTrades取得（公開・APIキー不要）
   async function fetchAggTrades(symbol, startMs, endMs, limit=1000){
     const url = new URL('https://api.binance.com/api/v3/aggTrades');
     url.search = new URLSearchParams({
@@ -63,7 +87,7 @@
     }).toString();
     const res = await fetch(url);
     if(!res.ok) throw new Error(`aggTrades fetch failed (${res.status})`);
-    return res.json(); // [{a:aggId,p:price,q:qty,f:... ,T:ms,m:bool}, ...]
+    return res.json(); // [{p:price,q:qty,T:ms,...}]
   }
 
   function findClosest(trades, targetMs){
@@ -73,7 +97,6 @@
       const d = Math.abs(t.T - targetMs);
       if(d < bestDiff){ best = t; bestDiff = d; }
     }
-    // 直前・直後も拾っておく（コンテキスト用）
     let before=null, after=null;
     for(const t of trades){
       if(t.T <= targetMs){ if(!before || t.T > before.T) before = t; }
@@ -92,52 +115,97 @@
 
     if(!dtStr){ head.textContent = '日時が未入力やで'; return; }
 
-    // 目標時刻（UTC ms）
     const targetUtcMs = jstLocalToUtcMs(dtStr);
 
-    // 検索ウィンドウ（±spanSec）
     let windowSec = spanSec;
-    let trades = [];
+    let tradesUsd = [], tradesJpy = [];
     head.textContent = `JST ${dtStr.replace('T',' ')} の直近約定を探索中…`;
 
-    // 段階的にウィンドウ拡大（データが薄い時間に対応）
-    for(const tries of [1,2,3]){
+    // 段階的にウィンドウ拡大（データ薄い時間帯対応）
+    for(const _ of [1,2,3]){
       const start = targetUtcMs - windowSec*1000;
       const end   = targetUtcMs + windowSec*1000;
       try{
-        trades = await fetchAggTrades('BTCUSDT', start, end, 1000);
+        // ここから修正：USD と JPY を同一ウィンドウで両取り
+        [tradesUsd, tradesJpy] = await Promise.all([
+          fetchAggTrades('BTCUSDT', start, end, 1000),
+          fetchAggTrades('BTCJPY',  start, end, 1000)
+        ]);
+        // ここまで修正
       }catch(err){
         note.textContent = `エラー: ${err.message}`;
         return;
       }
-      if(trades.length){ break; }
-      windowSec *= 4; // どんどん広げる
+      if(tradesUsd.length || tradesJpy.length) break;
+      windowSec *= 4;
     }
 
-    if(!trades.length){
-      head.textContent = 'その近辺の約定が見つからんかったで（時間を広げて再検索してみて）';
+    if(!tradesUsd.length){
+      head.textContent = 'その近辺の約定（BTCUSDT）が無かったで';
       main.textContent = '-';
       ctx.textContent  = '-';
       return;
     }
 
-    const {best, before, after, diffMs} = findClosest(trades, targetUtcMs);
+    const cUsd = findClosest(tradesUsd, targetUtcMs);
+    const bestUsd = cUsd.best;
 
-    // 表示
-    head.textContent = `JST ${dtStr.replace('T',' ')} の直近（差 ${Math.round(diffMs)} ms）`;
-    main.textContent = `価格(USD): ${fmtNum(best.p, 2)}   量(BTC): ${best.q}   約定時刻(JST): ${fmtJSTms(best.T)}`;
-    ctx.textContent  = `直前: ${before? fmtJSTms(before.T)+' @ '+fmtNum(before.p,2): 'なし'}   ／   直後: ${after? fmtJSTms(after.T)+' @ '+fmtNum(after.p,2): 'なし'}`;
-    note.textContent = 'Binance REST API / aggTrades（秒〜ミリ秒精度）';
+    // ここから追加：BTCJPY も最近傍を取り、USD/JPY を逆算
+    if(!tradesJpy.length){
+      note.textContent = 'BTCJPYが取れんかったからUSD/JPY逆算はスキップ';
+    }
+    let usdjpyText = '';
+    let usdjpy = null;
+    if(tradesJpy.length){
+      const cJpy = findClosest(tradesJpy, targetUtcMs);
+      const bestJpy = cJpy.best;
+      // price は文字列のことがあるので数値化
+      const pUsd = parseFloat(bestUsd.p);
+      const pJpy = parseFloat(bestJpy.p);
+      if(pUsd > 0){
+        usdjpy = pJpy / pUsd;
+        usdjpyText = `（USD/JPY≈ ${fmtNum(usdjpy,2)} = BTCJPY/BTCUSDT）`;
+        // 入力欄へ自動反映
+        document.getElementById('priceUsd').value = pUsd.toFixed(2);
+        document.getElementById('usdJpy').value  = usdjpy.toFixed(2);
+      }
+      // 文脈：直前直後もJPY側を見せる
+      ctx.textContent  = `USD 直前: ${cUsd.before? fmtJSTms(cUsd.before.T)+' @ '+fmtNum(cUsd.before.p,2): 'なし'} ／ 直後: ${cUsd.after? fmtJSTms(cUsd.after.T)+' @ '+fmtNum(cUsd.after.p,2): 'なし'}
+  ｜ JPY 直前: ${cJpy.before? fmtJSTms(cJpy.before.T)+' @ '+fmtNum(cJpy.before.p,0): 'なし'} ／ 直後: ${cJpy.after? fmtJSTms(cJpy.after.T)+' @ '+fmtNum(cJpy.after.p,0): 'なし'}`;
+    } else {
+      // 既存USD側の文脈だけ
+      ctx.textContent  = `直前: ${cUsd.before? fmtJSTms(cUsd.before.T)+' @ '+fmtNum(cUsd.before.p,2): 'なし'} ／ 直後: ${cUsd.after? fmtJSTms(cUsd.after.T)+' @ '+fmtNum(cUsd.after.p,2): 'なし'}`;
+    }
+    // ここまで追加
+
+    head.textContent = `JST ${dtStr.replace('T',' ')} の直近（差 ${Math.round(cUsd.diffMs)} ms）`;
+    main.textContent = `価格(USD): ${fmtNum(bestUsd.p, 2)}   量(BTC): ${bestUsd.q}   約定時刻(JST): ${fmtJSTms(bestUsd.T)} ${usdjpyText}`;
+    note.textContent = 'Binance aggTrades（BTCUSDT & BTCJPY）で逆算';
   }
 
-  // 初期値：いま（JST）
   (function init(){
     const now = new Date();
-    // JSTの現在時刻をdatetime-local用に
     const j = new Date(now.getTime() + 9*3600*1000);
     const s = `${j.getUTCFullYear()}-${pad2(j.getUTCMonth()+1)}-${pad2(j.getUTCDate())}T${pad2(j.getUTCHours())}:${pad2(j.getUTCMinutes())}:${pad2(j.getUTCSeconds())}`;
     document.getElementById('dt').value = s;
     document.getElementById('go').addEventListener('click', run);
+
+    // ここから追加：購入記録ボタン処理（円換算は逆算レートで）
+    document.getElementById('addRecord').addEventListener('click', ()=>{
+      const dt = document.getElementById('dt').value.replace('T',' ');
+      const priceUsd = parseFloat(document.getElementById('priceUsd').value);
+      const usdJpy   = parseFloat(document.getElementById('usdJpy').value);
+      const amount   = parseFloat(document.getElementById('amountBtc').value);
+      if(isNaN(priceUsd)||isNaN(usdJpy)||isNaN(amount)) return alert("価格・レート・数量を全部入れてな");
+
+      const priceJpy = priceUsd * usdJpy;
+      const totalJpy = priceJpy * amount;
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${dt}</td><td>${fmtNum(priceUsd,2)}</td><td>${fmtNum(priceJpy,2)}</td><td>${amount}</td><td>${fmtNum(totalJpy,0)}</td>`;
+      document.querySelector('#recordsTable tbody').appendChild(tr);
+    });
+    // ここまで追加
   })();
 </script>
 </body>
